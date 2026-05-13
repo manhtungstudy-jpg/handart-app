@@ -983,7 +983,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--text);font-size:13px
     <div><div class="pg-title">Điểm danh</div><div class="pg-sub">Ghi nhận buổi học</div></div>
     <div class="tr">
       <button class="btn btn-g" onclick="openAddStuToDD()">+ Thêm học sinh</button>
-      <button class="btn btn-s" onclick="saveDD()">💾 Lưu điểm danh</button>
+      <button class="btn btn-s" id="dd-save-btn" onclick="saveDD()">💾 Lưu điểm danh</button>
       <button class="btn btn-g" onclick="exportAttPDF()">📄 Xuất phiếu</button>
     </div>
   </div>
@@ -1939,8 +1939,24 @@ function updDateUI(){
   initDDSessTabs(); // Lọc lại ca theo ngày mới
   renderDD();
 }
-function chDate(d){curDate.setDate(curDate.getDate()+d);updDateUI();}
-function setDate(v){const[y,m,d]=v.split('-').map(Number);curDate=new Date(y,m-1,d);updDateUI();}
+function chDate(d){
+  if(ATT_DIRTY.size>0){
+    if(!confirm('Chưa lưu điểm danh! Chuyển ngày sẽ mất thay đổi. Tiếp tục?')) return;
+    ATT_DIRTY.clear();
+    const btn=document.getElementById('dd-save-btn');
+    if(btn){btn.style.background='';btn.textContent='💾 Lưu điểm danh';}
+  }
+  curDate.setDate(curDate.getDate()+d);updDateUI();
+}
+function setDate(v){
+  if(ATT_DIRTY.size>0){
+    if(!confirm('Chưa lưu điểm danh! Chuyển ngày sẽ mất thay đổi. Tiếp tục?')) return;
+    ATT_DIRTY.clear();
+    const btn=document.getElementById('dd-save-btn');
+    if(btn){btn.style.background='';btn.textContent='💾 Lưu điểm danh';}
+  }
+  const[y,m,d]=v.split('-').map(Number);curDate=new Date(y,m-1,d);updDateUI();
+}
 
 function getAttKey(){return fmtISO(curDate)+'_'+(curSess||'');}
 
@@ -2020,7 +2036,11 @@ function togDD(id){
   id=String(id);
   const key=getAttKey();if(!ATT[key])ATT[key]=new Set();
   ATT[key].has(id)?ATT[key].delete(id):ATT[key].add(id);
+  ATT_DIRTY.add(key); // Đánh dấu chưa lưu
   renderDD();
+  // Hiện trạng thái "chưa lưu" trên nút
+  const btn=document.getElementById('dd-save-btn');
+  if(btn){btn.style.background='#e65c00';btn.textContent='💾 Lưu điểm danh *';}
 }
 // pending saves để ghi batch khi bấm Lưu
 const ATT_DIRTY = new Set();
@@ -2033,14 +2053,30 @@ async function saveDD(){
   const sessId=curSess;
   const present=[...(ATT[key]||new Set())];
   // Xóa records cũ của ngày+ca này rồi insert lại
-  await sb.from('attendance').delete().eq('attend_date',dateStr).eq('session_id',sessId);
+  // Xóa toàn bộ attendance của buổi này trước
+  const {error:delErr}=await sb.from('attendance').delete()
+    .eq('attend_date',dateStr).eq('session_id',sessId);
+  if(delErr){showToast('⚠ Lỗi xóa cũ: '+delErr.message);return;}
+  // Insert mới nếu có học sinh có mặt
   if(present.length>0){
-    const rows=present.map(sid=>({student_id:sid,session_id:sessId,attend_date:dateStr,is_present:true}));
+    const rows=present.map(sid=>({
+      student_id:sid,session_id:sessId,
+      attend_date:dateStr,is_present:true
+    }));
     const {error}=await sb.from('attendance').insert(rows);
-    if(error){showToast('⚠ Lỗi lưu: '+error.message);return;}
+    if(error){
+      // Nếu duplicate → thử upsert
+      const {error:upErr}=await sb.from('attendance').upsert(rows,
+        {onConflict:'student_id,session_id,attend_date'});
+      if(upErr){showToast('⚠ Lỗi lưu: '+upErr.message);return;}
+    }
   }
   const sessLabel=SCHED_DATA.find(s=>s.id===sessId)?.label||'—';
-  showToast(`✓ Đã lưu điểm danh: ${present.length} học sinh — ${sessLabel} · ${fmtD(curDate)}`);
+  // Đếm học sinh có mặt = giao giữa present và ds trong ca (đăng ký + thêm thủ công)
+  const stuAll=getStudentsForSession().map(s=>String(s.id));
+  const presentValid=present.filter(id=>stuAll.includes(String(id)));
+  const countMsg=presentValid.length;
+  showToast(`✓ Đã lưu điểm danh: ${countMsg} học sinh có mặt — ${sessLabel} · ${fmtD(curDate)}`);
 }
 
 // Hiển thị lịch sử 6 tháng
@@ -3760,14 +3796,26 @@ function svTogAtt(stuId){
 async function svSaveAtt(){
   const key = svDate+'_'+svSessId;
   const present = [...(ATT[key]||new Set())];
-  await sb.from('attendance').delete().eq('attend_date',svDate).eq('session_id',svSessId);
+  const {error:delErr2}=await sb.from('attendance').delete()
+    .eq('attend_date',svDate).eq('session_id',svSessId);
+  if(delErr2){showToast('⚠ Lỗi xóa cũ: '+delErr2.message);return;}
   if(present.length>0){
-    const rows = present.map(sid=>({student_id:sid,session_id:svSessId,attend_date:svDate,is_present:true}));
-    const {error} = await sb.from('attendance').insert(rows);
-    if(error){showToast('⚠ Lỗi lưu: '+error.message);return;}
+    const rows=present.map(sid=>({
+      student_id:sid,session_id:svSessId,
+      attend_date:svDate,is_present:true
+    }));
+    const {error}=await sb.from('attendance').insert(rows);
+    if(error){
+      const {error:upErr}=await sb.from('attendance').upsert(rows,
+        {onConflict:'student_id,session_id,attend_date'});
+      if(upErr){showToast('⚠ Lỗi lưu: '+upErr.message);return;}
+    }
   }
   const sessLabel = SCHED_DATA.find(s=>s.id===svSessId)?.label||'—';
   showToast(`✓ Đã lưu: ${present.length} học sinh có mặt — ${sessLabel}`);
+  ATT_DIRTY.delete(key);
+  const btn=document.getElementById('dd-save-btn');
+  if(btn){btn.style.background='';btn.textContent='💾 Lưu điểm danh';}
   // Đồng bộ sang DD
   if(document.getElementById('p-dd').classList.contains('active')) renderDD();
 }
