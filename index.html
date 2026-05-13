@@ -1509,7 +1509,8 @@ async function loadAllData(){
     debt:s.debt_amount||0, paid:s.paid_amount||0,
     note:s.note||'',
     plan_expiry:s.plan_expiry||null,
-    payment_count:s.payment_count||0
+    payment_count:s.payment_count||0,
+    att_reset_date:s.att_reset_date||null
   }));
 
   // Load schedules
@@ -1784,7 +1785,20 @@ function getSessLabel(sessIds){
 // Đếm tổng buổi đã điểm danh của 1 học sinh
 function countAttAll(stuId){
   const sid=String(stuId);
-  return Object.values(ATT).filter(s=>s.has(sid)||s.has(stuId)).length;
+  const s=STUDENTS.find(x=>String(x.id)===sid);
+  const resetDate=s?.att_reset_date?new Date(s.att_reset_date+'T00:00:00'):null;
+  let count=0;
+  Object.keys(ATT).forEach(key=>{
+    if(!(ATT[key].has(sid)||ATT[key].has(stuId))) return;
+    if(resetDate){
+      // Chỉ đếm buổi từ ngày reset trở đi
+      const dateStr=key.split('_')[0];
+      const d=new Date(dateStr+'T12:00:00');
+      if(d<resetDate) return;
+    }
+    count++;
+  });
+  return count;
 }
 
 // Đếm buổi trong N tháng gần nhất
@@ -1828,8 +1842,9 @@ function renderOverview(){
   const tot=STUDENTS.length,act=STUDENTS.filter(s=>s.status!=='paused').length;
   const totalDebt=STUDENTS.reduce((a,s)=>a+(s.debt||0),0);
   const thisMonth=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  // Chỉ dùng pay_date (ngày đóng thực tế), không dùng created_at
   const totalRev=(PAYMENTS_CACHE||[]).filter(p=>{
-    const ds=p.pay_date||p.created_at||'';
+    const ds=p.pay_date||'';
     return ds.slice(0,7)===thisMonth;
   }).reduce((a,p)=>a+(p.amount||0),0);
   const ovBlocked=STUDENTS.filter(s=>s.status!=='paused'&&isStuBlocked(s)).length;
@@ -2845,6 +2860,7 @@ async function saveStu(){
     parent_name:parent, phone, address:document.getElementById('ns-addr').value.trim(),
     session_schedule:sessions, start_date:document.getElementById('ns-start').value||today,
     plan:planVal?planTxt:'Chưa đăng ký', status:'active',
+    att_reset_date:document.getElementById('ns-start').value||today,
     debt_amount:debt, paid_amount:paid,
     note:document.getElementById('ns-note').value.trim()
   };
@@ -3203,20 +3219,14 @@ function renderChart(){
 
   if(chartMode==='rev'){
     data=months.map(m=>{
-      // Từ payments table (có pay_date)
-      const fromPay=(PAYMENTS_CACHE||[]).filter(p=>{
-        const ds=p.pay_date||p.created_at||'';if(!ds)return false;
-        const d=new Date(ds.includes('T')?ds:ds+'T12:00:00');
+      // Chỉ dùng payments table với pay_date (ngày đóng thực tế)
+      // Không dùng created_at vì đó là timestamp server, không phải ngày đóng
+      return (PAYMENTS_CACHE||[]).filter(p=>{
+        const ds=p.pay_date||'';
+        if(!ds) return false;
+        const d=new Date(ds+'T12:00:00');
         return d.getFullYear()===chartYear&&d.getMonth()+1===m;
       }).reduce((s,p)=>s+(p.amount||0),0);
-      // Từ students.paid + start_date (chưa có payment record)
-      const paidStuIds=new Set((PAYMENTS_CACHE||[]).map(p=>String(p.student_id)).filter(Boolean));
-      const fromStu=STUDENTS.filter(s=>{
-        if(!s.start||!s.paid||paidStuIds.has(String(s.id)))return false;
-        const d=new Date(s.start+'T12:00:00');
-        return d.getFullYear()===chartYear&&d.getMonth()+1===m;
-      }).reduce((sm,s)=>sm+(s.paid||0),0);
-      return fromPay+fromStu;
     });
     color='#ff7a1a'; unit='đ';
   } else if(chartMode==='stu'){
@@ -3515,7 +3525,8 @@ function openPayPlan(stuId){
   document.getElementById('pp-note').value='';
   // Lần đóng
   const cnt=(s.payment_count||0)+1;
-  document.getElementById('pp-count').value='Lần '+cnt;
+  const today=new Date().toISOString().split('T')[0];
+  document.getElementById('pp-count').value='Lần '+cnt+' · '+fmtD(new Date(today+'T12:00:00'));
   // Gói hiện tại
   const planSel=document.getElementById('pp-plan');
   const opts=[...planSel.options];
@@ -3533,6 +3544,12 @@ function ppCalc(){
   if(!val||!date){wrap.style.display='none';return;}
   const [price,planName]=val.split('|');
   document.getElementById('pp-amount').value=document.getElementById('pp-amount').value||price;
+  // Cập nhật lần đóng + ngày
+  const stuId=document.getElementById('pp-stu-id').value;
+  const s=STUDENTS.find(x=>String(x.id)===String(stuId));
+  const cnt=(s?.payment_count||0)+1;
+  const dateLabel=date?fmtD(new Date(date+'T12:00:00')):'';
+  document.getElementById('pp-count').value=`Lần ${cnt}  ·  ${dateLabel}`;
   const exp=calcExpiry(date,planName);
   if(exp){
     const dm=getPlanDeadlineMonths(planName);
@@ -3550,6 +3567,7 @@ async function confPayPlan(){
   const amount=parseInt(document.getElementById('pp-amount').value)||0;
   if(!planVal||!date||!amount){showToast('⚠ Vui lòng điền đủ thông tin');return;}
   const [price,planName]=planVal.split('|');
+  const payDateStr=date||new Date().toISOString().split('T')[0];
   const s=STUDENTS.find(x=>String(x.id)===String(stuId));if(!s)return;
   const exp=calcExpiry(date,planName);
   const expStr=exp?exp.toISOString().split('T')[0]:null;
@@ -3557,23 +3575,28 @@ async function confPayPlan(){
   // Cập nhật Supabase
   const updates={plan:planName,paid_amount:(s.paid||0)+amount,
     debt_amount:Math.max(0,(s.debt||0)+parseInt(price)-amount),
-    plan_expiry:expStr, payment_count:newCount, status:'active'};
+    plan_expiry:expStr, payment_count:newCount, status:'active',
+    att_reset_date:payDateStr};
   const {error}=await sb.from('students').update(updates).eq('id',String(stuId));
   if(error){showToast('⚠ Lỗi: '+error.message);return;}
   // Ghi payment
   await sb.from('payments').insert({
     student_id:String(stuId),amount,payment_type:'học phí',
-    pay_date:date,method:'Tiền mặt',
+    pay_date:payDateStr,method:'Tiền mặt',
     note:document.getElementById('pp-note').value||'Lần '+newCount+' · '+planName,
     recorded_by:curUser?.auth_id||null
   });
-  // Update local
+  PAYMENTS_CACHE.push({student_id:String(stuId),amount,pay_date:payDateStr,payment_type:'học phí'});
+  // Update local — reset tiến trình về gói mới
   Object.assign(s,{plan:planName,paid:(s.paid||0)+amount,
     debt:Math.max(0,(s.debt||0)+parseInt(price)-amount),
-    plan_expiry:expStr,payment_count:newCount,status:'active'});
+    plan_expiry:expStr,payment_count:newCount,status:'active',
+    att_reset_date:payDateStr});
   closeM('m-pay-plan');
   renderDs();
-  showToast('✓ Đã ghi nhận đóng học phí — '+planName);
+  // Cập nhật DD nếu đang mở
+  if(document.getElementById('p-dd').classList.contains('active')) renderDD();
+  showToast('✓ Đã ghi nhận đóng học phí — '+planName+' · Lần '+newCount);
 }
 
 // ── ĐỔI VAI TRÒ ──
@@ -3930,7 +3953,7 @@ checkSession();
         <input type="number" id="pp-amount" step="1000" placeholder="Nhập số tiền...">
       </div>
       <div class="field">
-        <label>Lần đóng thứ</label>
+        <label>Lần đóng</label>
         <input type="text" id="pp-count" class="ro" readonly>
       </div>
     </div>
