@@ -2682,10 +2682,13 @@ async function confHP(){
   if(error){showToast('⚠ Lỗi: '+error.message);return;}
   s.paid+=paid;s.debt=rem;
   // Ghi payment record
-  await sb.from('payments').insert({student_id:String(id),amount:paid,payment_type:'học phí',pay_date:document.getElementById('hp2-date').value||today,method:document.getElementById('hp2-mth').value,recorded_by:curUser?.auth_id||null});
+  const hp2PayDate=document.getElementById('hp2-date').value||today;
+  await sb.from('payments').insert({student_id:String(id),amount:paid,payment_type:'học phí',pay_date:hp2PayDate,method:document.getElementById('hp2-mth').value,recorded_by:curUser?.auth_id||null});
+  PAYMENTS_CACHE.push({student_id:String(id),amount:paid,pay_date:hp2PayDate,payment_type:'học phí'});
   document.getElementById('hp2-amt').value='';document.getElementById('hp2-rem').value='';
   document.getElementById('hp2-partial').style.display='none';
   loadHp2(id);renderHp0();
+  if(document.getElementById('p-overview').classList.contains('active'))renderOverview();
   showToast(`✓ Thu ${fmt(paid)} từ ${s.full_name}`+(rem>0?` · Còn ${fmt(rem)}`:' · Sạch nợ ✓'));
 }
 
